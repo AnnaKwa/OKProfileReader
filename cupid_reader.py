@@ -11,7 +11,8 @@ from nltk import SnowballStemmer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn import preprocessing
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import precision_recall_curve, roc_auc_score, roc_curve, auc
+from sklearn.metrics import precision_recall_curve, roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
+from wordcloud import WordCloud
 
 
 def read_pickle(profile_pickle):
@@ -46,7 +47,13 @@ def clean_profiles(dataframe, pickleName='cleaned_profiles.p', savePickle=False)
 def labels_to_numeric(profilesDF, colName):
     # column category should be something with 2 - reasonable number of categories, e.g. sex, orientation
     # status, smoking,
-    text_ids = profilesDF[colName]
+    text_ids = list(profilesDF[colName])
+
+    for r,response in enumerate(text_ids):
+        if isinstance(response, str)!=True:
+            if math.isnan(response):
+                text_ids[r]='no response'
+
     Nlabels = len(np.unique(text_ids))
     le = preprocessing.LabelEncoder()
     le.fit(text_ids)
@@ -82,8 +89,9 @@ def perf_measure(y_actual, y_hat):
     for i in range(len(y_hat)):
         if y_hat[i]==0 and y_actual!=y_hat[i]:
             FN += 1
-    accuracy = (TP+TN)/(TP+TN+FN+FP)
-    return(accuracy, TP, FP, TN, FN)
+    precision = TP/(TP+FP)
+    recall = TP/(TP+FN)
+    return (precision, recall, TP, FP, TN, FN)
 
 
 class prediction:
@@ -107,6 +115,9 @@ class essay:
         essay_str='essay'+str(essay_num)
         if isinstance(essay_num, int )==False or essay_num>9:
             raise('Need essay number to be an integer from 0-9')
+        essay_prompts = ['My self summary', "What I am doing with my life", "I am really good at", "The first thing people usually notice about me", "Favorite books, movies, show, music, and food", "The six things I could never do without", "I spend a lot of time thinking about", "On a typical Friday night I am", "The most private thing I am willing to admit", "You should message me if..." ]
+        self.essay_prompt = essay_prompts[self.essay_num]
+
         # stop words
         self.stopWords = set(stopwords.words('english'))
         # punctuation
@@ -174,44 +185,47 @@ class essay:
         else:
             print('Scores not saved for ',label,' prediction.')
 
+
+    def train_test_split(self, frac_training):
+        self.train_corpus, self.test_corpus, self.train_idx, self.test_idx = \
+            training_split(self.corpus, frac_training)
+
+
     def stem_and_remove_punctuation(self, stemmer=SnowballStemmer("english"), showTime=True  ):
-        if showTime==True:
-            start_time = time.time()
         # function to stem and remove punctuation and contractions from a single response
         def stem_rm_punc(response, stemmer):
             if isinstance(response, str)==True:
                 words = word_tokenize(response)
                 wordsFiltered = []
-
-                # since I have a gut feeling that certain types of people may use '?' or '!' more when writing,
+                # since I have a feeling that certain types of people may use '?', '!', emojis, etc more when writing,
                 # I'll replace those with strings that hopefully will get picked up as features
                 for w in words:
                     if w=='!':
                         wordsFiltered.append('exclamationpoint')
                     elif w=='?':
                         wordsFiltered.append('questionmark')
+                    elif w==':)':
+                        wordsFiltered.append('smileyemoji')
                     elif w not in self.stopWords and w not in self.punctuation:
                         stemmed_word = stemmer.stem(w)   # stem words (e.g. eating --> eat)
                         wordsFiltered.append(stemmed_word)
                 spacing = " "
                 return spacing.join(wordsFiltered)
-
             # else if the response is left blank (NaN), return stop word 'i' just so we don't get
             # stuck with a 'not string' error later on
             else:
                 return('i')
 
+        if showTime==True:
+            start_time = time.time()
+
         temp_corpus = [stem_rm_punc(response, stemmer) for response in self.corpus]
         self.corpus = temp_corpus
         del temp_corpus
-
         print('Removed punctuation, tokenized, and stemmed responses for essay ', str(self.essay_num) )
         if showTime==True:
             print('Time Elapsed: {0:.2f}s'.format(time.time()-start_time))
 
-    def train_test_split(self, frac_training):
-        self.train_corpus, self.test_corpus, self.train_idx, self.test_idx = \
-            training_split(self.corpus, frac_training)
 
 
     def vectorizer_init(self, ngram_max=2, min_df=0.01, max_df=0.9):
@@ -268,10 +282,33 @@ class essay:
 
         return mdl, yScore
 
+    def plotPrecisionRecallCurve(self, label, prediction):
+
+        if len(prediction.id_pairs)==2:
+            y_true = prediction.test_prediction
+            yScore = self.retrieve_yScore(label)
+            precision, recall, thresholds = precision_recall_curve( y_true, yScore[:,1] )
+            average_precision = average_precision_score( y_true, yScore[:,1] )
+            plt.step(recall, precision, color='b', alpha=0.2,
+                     where='post')
+            plt.fill_between(recall, precision, step='post', alpha=0.2,
+                             color='b')
+
+            plt.xlabel('Recall')
+            plt.ylabel('Precision')
+            plt.ylim([0.0, 1.05])
+            plt.xlim([0.0, 1.0])
+            plt.title('Response '+str(self.essay_num)+', '+label+' prediction', fontsize=20)
+            #plt.title('2-class Precision-Recall curve: AUC={0:0.2f}'.format(average_precision), fontsize=18)
+            plt.show()
+        else:
+            print('Not set up for multi class yet')
+
+
     def plotROC(self, label, prediction):
 
         # ROC curve plotting function from NLP workshop
-        def plot_roc(y_true, y_score):
+        def plot_roc(y_true, y_score, label):
             """
             Plots the precision and recall as a function
             of the percent of data for which we calculate
@@ -282,27 +319,34 @@ class essay:
             roc_auc = roc_auc_score( y_true, y_score)
 
 
-            plt.figure(figsize=(4,4))
+            fig = plt.figure(figsize=(6,6))
             lw = 2
-            plt.plot(fpr, tpr, color='darkorange',
+            ax=fig.add_subplot(111)
+            ax.plot(fpr, tpr, color='darkorange',
                  lw=lw, label='ROC curve (area = %0.2f)' % roc_auc)
-            plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.01])
-            #plt.xlabel(r'False Positive Rate')
-            #plt.ylabel(r'True Positive Rate')
+            ax.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+            ax.set_xlim([0.0, 1.0])
+            ax.set_ylim([0.0, 1.01])
+            ax.set_xlabel('False Positive Rate', fontsize=18)
+            ax.set_ylabel('True Positive Rate', fontsize=18)
             auc_str= ("%.2f" % roc_auc)
-            plt.title( 'AUC = ' + auc_str)
+            ax.set_title(self.essay_prompt+', '+label+' prediction', fontsize=20)
+            ax.annotate('AUC = ' + auc_str,xy=(0.95,0.1),xycoords="axes fraction",ha="right", size=18)
             #plt.legend(loc="lower right")
             plt.show()
 
         y_true = prediction.test_prediction
+
+        yScore = self.retrieve_yScore(label)
+        plot_roc(y_true, yScore[:,1], label)
+
+        '''
         try:
             yScore = self.retrieve_yScore(label)
-            plot_roc(y_true, yScore[:,1])
+            plot_roc(y_true, yScore[:,1], label)
         except:
             print('Y scores not save for ',label,'. Try execute add_prediction(label, model) first?' )
-
+        '''
 
 
     def fit_with_bestMinDF(self, prediction, label, ngram_max, minDF_range, maxDF=0.9, showTime=True):
@@ -344,35 +388,43 @@ class essay:
         if showTime==True:
             print('Time Elapsed: {0:.2f}s'.format(time.time()-start_time))
 
-    def get_top_features(self, label, prediction, Ntop_features):
+    def get_top_features(self, label, prediction, Ntop_features, printOutput=True):
+        # returns nested list of tuples (Ntop_features words, abs(coeffs) ) for each categorization
+
         # print out the top Ntop_features for a prediction category
         vectorizer = self.retrieve_vectorizer(label)
         features_stem = vectorizer.get_feature_names()
         mdl = self.retrieve_model(label)
         #zipped_coef_features = list( zip(mdl.coef_[0], features_stem),  )
         #zipped_coef_features.sort()
-        print('Top feature words for category: ', label)
+
+        if printOutput==True:
+            print('Top feature words for category: ', label)
 
         if mdl.coef_.shape[0]>2:
+            wordlists=[]
             for i, id_pair in enumerate(prediction.id_pairs):
                 print(i, id_pair)
                 id_num, id_text = id_pair[0], id_pair[1]
 
                 zipped_coef_features = list( zip(mdl.coef_[i], features_stem),  )
                 zipped_coef_features.sort()
+                if printOutput==True:
+                    print('Top ',repr(Ntop_features),' feature words for ',id_text,' profiles:')
+                    for f in range(0,Ntop_features):
+                        print(zipped_coef_features[f][1], ',  coef=',zipped_coef_features[f][0])
+                    print()
+                wordlists.append( [ (zipped_coef_features[f][1], abs(zipped_coef_features[f][0])) for f in range(Ntop_features) ] )
+            return wordlists
 
-                print('Top ',repr(Ntop_features),' feature words for ',id_text,' profiles:')
-                for f in range(0,Ntop_features):
-                    print(zipped_coef_features[f][1], ',  coef=',zipped_coef_features[f][0])
-                print()
         # only one coefficient is saved for binary classification
         else:
-                id_pairs = prediction.id_pairs
-                id_text0, id_text1 = id_pairs[0][1], id_pairs[1][1]
+            id_pairs = prediction.id_pairs
+            id_text0, id_text1 = id_pairs[0][1], id_pairs[1][1]
 
-                zipped_coef_features = list( zip(mdl.coef_[0], features_stem),  )
-                zipped_coef_features.sort()
-
+            zipped_coef_features = list( zip(mdl.coef_[0], features_stem),  )
+            zipped_coef_features.sort()
+            if printOutput==True:
                 print('Top ',repr(Ntop_features),' feature words for ',id_text0,' profiles:')
                 for f in range(0,Ntop_features):
                     print(zipped_coef_features[f][1], ',  coef=',zipped_coef_features[f][0])
@@ -382,3 +434,35 @@ class essay:
                 for f in range(0,Ntop_features):
                     print(zipped_coef_features[len(zipped_coef_features)-f-1][1],',  coef=',zipped_coef_features[len(zipped_coef_features)-f-1][0] )
                 print()
+            words_0 = [(zipped_coef_features[i][1], abs(zipped_coef_features[i][0])) for i in range(0,Ntop_features)]
+            words_1 = [(zipped_coef_features[len(zipped_coef_features)-i-1][1],     abs(zipped_coef_features[len(zipped_coef_features)-i-1][0]) ) for i in range(0,Ntop_features)]
+            return [words_0, words_1]
+
+
+    def make_wordcloud(self, label, prediction, Ntop_features, bg_color='beige', cmap="RdPu", maxFont=None):
+        wordSets = self.get_top_features(label, prediction, Ntop_features, printOutput=False)
+        for s,tupleSet in enumerate(wordSets):
+            id_pair=prediction.id_pairs[s]
+            id_num, id_text = id_pair[0], id_pair[1]
+            titleStr = id_text+' top words'
+            #s =" "
+            #joinedSet = s.join(set)
+            ColorMap=plt.get_cmap(cmap)
+            wordcloud = WordCloud(max_font_size=maxFont, \
+                                    width=1200, \
+                                    height=600, \
+                                    background_color=bg_color, \
+                                    colormap=ColorMap    ).fit_words(dict(tupleSet))
+            plt.figure(figsize=(12,6))
+            plt.imshow(wordcloud, interpolation='bilinear')
+            plt.axis("off")
+            plt.title(self.essay_prompt+": "+titleStr, fontsize=24)
+            plt.show()
+
+
+    def make_prediction(self, label, prediction, threshold=0.5):
+        # if binary classification, only need to return a 1D array of yes/no IDs for class 0
+        if len(gender_prediction.id_pairs)==2:
+
+        else:
+            print('Not set up for multi class predictions yet.')
