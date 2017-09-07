@@ -81,13 +81,13 @@ def perf_measure(y_actual, y_hat):
         if y_actual[i]==y_hat[i]==1:
             TP += 1
     for i in range(len(y_hat)):
-        if y_hat[i]==1 and y_actual!=y_hat[i]:
+        if y_hat[i]==1 and y_actual[i]!=y_hat[i]:
             FP += 1
     for i in range(len(y_hat)):
         if y_actual[i]==y_hat[i]==0:
             TN += 1
     for i in range(len(y_hat)):
-        if y_hat[i]==0 and y_actual!=y_hat[i]:
+        if y_hat[i]==0 and y_actual[i]!=y_hat[i]:
             FN += 1
     precision = TP/(TP+FP)
     recall = TP/(TP+FN)
@@ -97,11 +97,11 @@ def perf_measure(y_actual, y_hat):
 class prediction:
     def __init__(self, profiles, colLabel, frac_training=0.8):
         self.numeric_ids, self.text_ids = labels_to_numeric(profiles, colLabel)
-        self.train_prediction, self.test_prediction, self.train_prediction_idx, self.test_prediction_idx = \
+        self.train_trueCategory, self.test_trueCategory, self.train_trueCategory_idx, self.test_trueCategory_idx = \
             training_split(self.numeric_ids, frac_training)
 
         self.id_pairs = list( set( list((zip(self.numeric_ids, self.text_ids)) ) ) )
-
+        self.id_pairs.sort()
 
 class essay:
     '''
@@ -277,7 +277,7 @@ class essay:
         # fit a regularized logistic regression model (default is L2 penalty)
         clf = LogisticRegression(penalty=reg_penalty)
         #fit the model to the training data
-        mdl = clf.fit(train_tfidf, prediction.train_prediction)
+        mdl = clf.fit(train_tfidf, prediction.train_trueCategory)
         yScore = mdl.predict_proba( test_tfidf )
 
         return mdl, yScore
@@ -285,7 +285,7 @@ class essay:
     def plotPrecisionRecallCurve(self, label, prediction):
 
         if len(prediction.id_pairs)==2:
-            y_true = prediction.test_prediction
+            y_true = prediction.test_trueCategory
             yScore = self.retrieve_yScore(label)
             precision, recall, thresholds = precision_recall_curve( y_true, yScore[:,1] )
             average_precision = average_precision_score( y_true, yScore[:,1] )
@@ -335,7 +335,7 @@ class essay:
             #plt.legend(loc="lower right")
             plt.show()
 
-        y_true = prediction.test_prediction
+        y_true = prediction.test_trueCategory
 
         yScore = self.retrieve_yScore(label)
         plot_roc(y_true, yScore[:,1], label)
@@ -355,7 +355,7 @@ class essay:
 
         # loop through values of minDF in range and save the one with the best auc
         eval_measures = []
-        y_true = prediction.test_prediction
+        y_true = prediction.test_trueCategory
 
         #try:
         for minDF in minDF_range:
@@ -444,7 +444,7 @@ class essay:
         for s,tupleSet in enumerate(wordSets):
             id_pair=prediction.id_pairs[s]
             id_num, id_text = id_pair[0], id_pair[1]
-            titleStr = id_text+' top words'
+            titleStr = id_text
             #s =" "
             #joinedSet = s.join(set)
             ColorMap=plt.get_cmap(cmap)
@@ -460,9 +460,70 @@ class essay:
             plt.show()
 
 
-    def make_prediction(self, label, prediction, threshold=0.5):
+    def make_prediction(self, label, prediction, threshold=0.5, printOutput=False):
         # if binary classification, only need to return a 1D array of yes/no IDs for class 0
-        if len(gender_prediction.id_pairs)==2:
+        if len(prediction.id_pairs)==2:
+            yScore = self.retrieve_yScore(label)[:,1]
+
+            test_prediction = 0.5*(np.sign(yScore-threshold)+1)     # 1 if yscore is above threshold, 0 if below
+            precision = perf_measure( prediction.test_trueCategory, test_prediction )[0]
+            if printOutput==True:
+                print(self.essay_prompt+': ')
+                print('Precision aka TP/(TP+FP) = ', precision)
+                print()
+            return precision
+        else:
+            print('Not set up for multi class predictions yet.')
+
+    def show_extremes(self, profiles, label, prediction, threshold=0.5):
+        if len(prediction.id_pairs)==2:
+            correct_predictions_idx, incorrect_predictions_idx = [],[]
+            correct_predictions_scores, incorrect_predictions_scores = [],[]
+            idx = prediction.test_trueCategory_idx
+            yScore = self.retrieve_yScore(label)[:,0]
+            test_prediction = 0.5*(np.sign(yScore-threshold)+1)
+            for p,pred in enumerate(test_prediction):
+                if int(pred-prediction.test_trueCategory[p])==0:
+                    correct_predictions_idx.append(p)
+                    correct_predictions_scores.append(yScore[p])
+                else:
+                    incorrect_predictions_idx.append(p)
+                    incorrect_predictions_scores.append(yScore[p])
+
+            essay_str='essay'+str(self.essay_num)
+            print(self.essay_prompt)
+
+            # print correct prediction + highest yScore
+            p_hi_correct = np.argmax(correct_predictions_scores)
+            profile_idx = idx[ correct_predictions_idx[p_hi_correct]]
+            print(label+' prediction: ', prediction.id_pairs[1][1], ' (correct)')
+            print('Highest y score for correct predictions: ', correct_predictions_scores[p_hi_correct], ', index=',profile_idx)
+            print('Response: ', profiles[essay_str][profile_idx], '\n')
+
+            # print correct prediction + lowest yScore (the other category)
+            p_lo_correct = np.argmin(correct_predictions_scores)
+            profile_idx = idx[correct_predictions_idx[p_lo_correct]]
+            print(label+' prediction: ', prediction.id_pairs[0][1], ' (correct)' )
+            print('Lowest y score for correct predictions: ', correct_predictions_scores[p_lo_correct], ', index=', profile_idx)
+            print('Response: ', profiles[essay_str][profile_idx], '\n')
+
+            try:
+                # print incorrect prediction + highest yScore  (very incorrect prediction)
+                p_hi_incorrect = np.argmax(incorrect_predictions_scores)
+                profile_idx = idx[ incorrect_predictions_idx[p_hi_incorrect] ]
+                print(label+' predictions: ',  prediction.id_pairs[1][1], ' (incorrect)')
+                print('Highest y score for incorrect predictions: ', incorrect_predictions_scores[p_hi_incorrect], ', index=',profile_idx)
+                print('Response: ', profiles[essay_str][profile_idx], '\n')
+
+                # print incorrect prediction + lowest yScore  (very incorrect prediction)
+                p_lo_incorrect = np.argmin(incorrect_predictions_scores)
+                profile_idx = idx[ incorrect_predictions_idx[p_lo_incorrect] ]
+                print(label+' predictions: ', prediction.id_pairs[0][1], ' (incorrect)' )
+                print('Lowest y score for incorrect predictions: ', incorrect_predictions_scores[p_lo_incorrect],', index=',profile_idx)
+                print('Response: ', profiles[essay_str][profile_idx], '\n')
+                #return incorrect_predictions_idx, incorrect_predictions_scores
+            except:
+                return incorrect_predictions_idx, incorrect_predictions_scores
 
         else:
             print('Not set up for multi class predictions yet.')
